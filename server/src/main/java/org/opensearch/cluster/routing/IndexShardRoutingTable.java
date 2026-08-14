@@ -702,15 +702,29 @@ public class IndexShardRoutingTable extends AbstractDiffable<IndexShardRoutingTa
         return new PlainShardIterator(shardId, ordered);
     }
 
+    /**
+     * Builds an ordered iterator over replicas matching {@code filter}.
+     * <p>
+     * Eligible replicas are collected first, then rotated. Rotating the full
+     * replica list (including copies that fail the filter) before filtering
+     * biases which matching replica is preferred — for example with
+     * {@link #searchReplicaActiveInitializingShardIt()} when writable data
+     * replicas are present. Filtering first keeps selection fair among the
+     * eligible set only.
+     */
     private ShardIterator filterAndOrderShards(Predicate<ShardRouting> filter) {
-        LinkedList<ShardRouting> ordered = new LinkedList<>();
-        for (ShardRouting replica : shuffler.shuffle(replicas)) {
+        List<ShardRouting> matching = new ArrayList<>();
+        for (ShardRouting replica : replicas) {
             if (filter.test(replica)) {
-                if (replica.active()) {
-                    ordered.addFirst(replica);
-                } else if (replica.initializing()) {
-                    ordered.addLast(replica);
-                }
+                matching.add(replica);
+            }
+        }
+        LinkedList<ShardRouting> ordered = new LinkedList<>();
+        for (ShardRouting replica : shuffler.shuffle(matching)) {
+            if (replica.active()) {
+                ordered.addFirst(replica);
+            } else if (replica.initializing()) {
+                ordered.addLast(replica);
             }
         }
         return new PlainShardIterator(shardId, ordered);

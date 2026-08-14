@@ -1,0 +1,136 @@
+# =============================================================================
+# VSCO FORK ONLY — REMOVE BEFORE OPENING A PR TO opensearch-project/OpenSearch
+#
+# Builds the core OpenSearch Docker image from this fork and pushes ONLY to:
+#   ghcr.io/vsco/opensearch:<tag>
+#
+# Tag convention matches official OpenSearch releases with a VSCO suffix, e.g.:
+#   3.8.0-vsco1
+# (same pattern as ome: 0.1.5-vsco7)
+#
+# Usage:
+#   Actions → "VSCO (fork) publish OpenSearch image to ghcr.io/vsco" → Run workflow
+#   Default image_tag: 3.8.0-vsco1
+#
+# Auth: GITHUB_TOKEN usually works for packages:write in the vsco org.
+#       If pushes fail with 403, add repo secret VSCO_GHCR_TOKEN (PAT with
+#       write:packages).
+#
+# Note: this builds the in-repo core/min image via Gradle
+# (:distribution:docker:buildDockerImage), not the full Hub distro from
+# opensearch-build. Point the OpenSearch operator / Helm values at
+# ghcr.io/vsco/opensearch:3.8.0-vsco1 after publishing.
+# =============================================================================
+
+name: VSCO (fork) publish OpenSearch image to ghcr.io/vsco
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag for ghcr.io/vsco/opensearch (e.g. 3.8.0-vsco1)'
+        required: true
+        default: '3.8.0-vsco1'
+      java_version:
+        description: 'JDK major version for the Gradle build'
+        required: true
+        default: '21'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_ORG: vsco
+  IMAGE_NAME: opensearch
+
+jobs:
+  build-push-opensearch:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install protoc
+        run: |
+          set -euo pipefail
+          if [ "$(uname -m)" = "x86_64" ]; then
+            curl -fsSL -X GET "https://github.com/protocolbuffers/protobuf/releases/download/v33.0/protoc-33.0-linux-x86_64.zip" -o protoc.zip
+          else
+            curl -fsSL -X GET "https://github.com/protocolbuffers/protobuf/releases/download/v33.0/protoc-33.0-linux-aarch_64.zip" -o protoc.zip
+          fi
+          sudo unzip -o protoc.zip -d /usr/local && rm -f protoc.zip
+          protoc --version
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          java-version: ${{ inputs.java_version }}
+          distribution: temurin
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io (org vsco packages)
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.VSCO_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Resolve upstream OpenSearch version
+        id: version
+        run: |
+          set -euo pipefail
+          # buildSrc/version.properties: opensearch = 3.8.0
+          OS_VERSION="$(awk -F= '/^opensearch[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' buildSrc/version.properties)"
+          if [[ -z "${OS_VERSION}" ]]; then
+            echo "Could not read opensearch version from buildSrc/version.properties" >&2
+            exit 1
+          fi
+          echo "opensearch_version=${OS_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building OpenSearch ${OS_VERSION}; publishing as ${{ inputs.image_tag }}"
+
+      - name: Validate image tag matches base release
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.image_tag }}"
+          BASE="${{ steps.version.outputs.opensearch_version }}"
+          case "${TAG}" in
+            "${BASE}-vsco"*) ;;
+            *)
+              echo "image_tag '${TAG}' must start with '${BASE}-vsco' (e.g. ${BASE}-vsco1)" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Build OpenSearch Docker image (Gradle)
+        run: |
+          set -euo pipefail
+          ./gradlew :distribution:docker:buildDockerImage --parallel --no-build-cache -PDISABLE_BUILD_CACHE
+
+      - name: Retag and push to ghcr.io/vsco
+        run: |
+          set -euo pipefail
+          SRC="docker.opensearch.org/opensearch:${{ steps.version.outputs.opensearch_version }}"
+          DST="${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}"
+          if ! docker image inspect "${SRC}" >/dev/null 2>&1; then
+            # Fallback used by some Gradle builds
+            SRC="opensearch:test"
+          fi
+          docker tag "${SRC}" "${DST}"
+          docker push "${DST}"
+          echo "Pushed ${DST}"
+
+      - name: Summary
+        run: |
+          {
+            echo "## VSCO OpenSearch image"
+            echo ""
+            echo "Upstream version (buildSrc): \`${{ steps.version.outputs.opensearch_version }}\`"
+            echo "Pushed: \`${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}\`"
+            echo ""
+            echo "Point the OpenSearch Helm/operator image to that tag."
+            echo "Remove \`.github/workflows/vsco-publish-opensearch-image.yaml\` before submitting a PR upstream."
+          } >> "$GITHUB_STEP_SUMMARY"
