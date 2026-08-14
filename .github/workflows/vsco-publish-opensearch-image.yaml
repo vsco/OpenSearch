@@ -140,17 +140,38 @@ jobs:
       - name: Build patched core jar (Gradle)
         run: |
           set -euo pipefail
-          ./gradlew :server:jar --parallel
+          # -Dbuild.snapshot=false is how opensearch-build produces a release: without
+          # it the artifact is opensearch-<version>-SNAPSHOT.jar and its manifest
+          # advertises a snapshot, which would not match the release plugins bundled
+          # in the base image.
+          ./gradlew :server:jar --parallel -Dbuild.snapshot=false
 
       - name: Stage build context
         id: stage
         run: |
           set -euo pipefail
           OS_VERSION="${{ steps.version.outputs.opensearch_version }}"
-          JAR="server/build/libs/opensearch-${OS_VERSION}.jar"
-          if [[ ! -f "${JAR}" ]]; then
-            echo "Expected core jar at ${JAR}; found:" >&2
-            ls -la server/build/libs/ >&2 || true
+
+          # Locate the jar rather than assume server/build/libs: Gradle's layout has
+          # moved before, and a silently-wrong path here is what a bad image looks like.
+          JARS=()
+          mapfile -t JARS < <(find . -type f -name "opensearch-${OS_VERSION}.jar" \
+            -not -path './.git/*' | sort)
+          if [[ ${#JARS[@]} -ne 1 ]]; then
+            echo "Expected exactly one opensearch-${OS_VERSION}.jar, found ${#JARS[@]}." >&2
+            echo "--- every opensearch-*.jar in the workspace ---" >&2
+            find . -type f -name 'opensearch-*.jar' -not -path './.git/*' >&2 || true
+            echo "--- directories under server/ (depth 3) ---" >&2
+            find server -maxdepth 3 -type d >&2 || true
+            exit 1
+          fi
+          JAR="${JARS[0]}"
+          echo "Core jar: ${JAR}"
+          unzip -p "${JAR}" META-INF/MANIFEST.MF | grep -i 'version' || true
+
+          # Guard against grabbing some other artifact that happens to match the name.
+          if ! unzip -l "${JAR}" | grep -q 'org/opensearch/cluster/routing/IndexShardRoutingTable.class'; then
+            echo "${JAR} does not contain the patched class; wrong artifact." >&2
             exit 1
           fi
 
