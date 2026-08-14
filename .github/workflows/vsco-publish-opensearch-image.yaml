@@ -54,6 +54,7 @@ env:
   IMAGE_ORG: vsco
   IMAGE_NAME: opensearch
   BASE_REPO: opensearchproject/opensearch
+  UPSTREAM_REPO: opensearch-project/OpenSearch
   PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
@@ -120,17 +121,21 @@ jobs:
         run: |
           set -euo pipefail
           BASE="${{ steps.version.outputs.opensearch_version }}"
-          git fetch --no-tags --depth=1 origin "refs/tags/${BASE}:refs/tags/${BASE}"
+          # Anchor on upstream's tag, not the fork's: the base image was built from
+          # upstream ${BASE}, and a fork made with "copy the default branch only"
+          # carries no release tags (3.8.0 lives on the 3.8 branch, not main).
+          git fetch --no-tags --depth=1 "https://github.com/${{ env.UPSTREAM_REPO }}.git" \
+            "refs/tags/${BASE}:refs/tags/upstream-${BASE}"
           # Swapping only lib/opensearch-<version>.jar is safe only while every
           # change since the tag lands in :server (or is fork-only tooling).
-          CHANGED="$(git diff --name-only "refs/tags/${BASE}..HEAD" \
+          CHANGED="$(git diff --name-only "refs/tags/upstream-${BASE}..HEAD" \
             | grep -v -E '^(server/|\.github/workflows/vsco-)' || true)"
           if [[ -n "${CHANGED}" ]]; then
-            echo "Changes outside server/ since tag ${BASE}; a core-jar swap would silently drop them:" >&2
+            echo "Changes outside server/ since upstream tag ${BASE}; a core-jar swap would silently drop them:" >&2
             echo "${CHANGED}" >&2
             exit 1
           fi
-          git diff --stat "refs/tags/${BASE}..HEAD"
+          git diff --stat "refs/tags/upstream-${BASE}..HEAD"
 
       - name: Build patched core jar (Gradle)
         run: |
