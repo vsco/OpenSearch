@@ -1,25 +1,34 @@
 # =============================================================================
 # VSCO FORK ONLY — REMOVE BEFORE OPENING A PR TO opensearch-project/OpenSearch
 #
-# Builds the core OpenSearch Docker image from this fork and pushes ONLY to:
-#   ghcr.io/vsco/opensearch:<tag>
+# Publishes a patched OpenSearch image to:
+#   ghcr.io/vsco/opensearch:<tag>          e.g. 3.8.0-vsco1
+# (same tag pattern as ome: 0.1.5-vsco7)
 #
-# Tag convention matches official OpenSearch releases with a VSCO suffix, e.g.:
-#   3.8.0-vsco1
-# (same pattern as ome: 0.1.5-vsco7)
+# Approach: derive from the official opensearchproject/opensearch:<version>
+# image and replace only the core jar (lib/opensearch-<version>.jar) built from
+# this fork.
+#
+# Why not :distribution:docker:buildDockerImage — that Gradle task produces the
+# *min* distribution: /usr/share/opensearch/plugins is empty, so there is no
+# opensearch-security (the operator's HTTPS + basic-auth probes never pass) and
+# no opensearch-knn. The Docker Hub image is assembled separately by
+# opensearch-build and bundles ~26 plugins. It is also single-arch, built for
+# whatever the runner happens to be.
+#
+# distribution/build.gradle puts `libs project(':server')` into lib/, so
+# swapping opensearch-<version>.jar is equivalent to rebuilding the
+# distribution with this fork's patch — provided this fork stays at the
+# <version> tag plus core-only changes. The jar is pure bytecode, so one build
+# serves every platform and buildx emits a real multi-arch manifest list off
+# the official multi-arch base (no QEMU needed: the Dockerfile only COPYs).
 #
 # Usage:
 #   Actions → "VSCO (fork) publish OpenSearch image to ghcr.io/vsco" → Run workflow
-#   Default image_tag: 3.8.0-vsco1
 #
 # Auth: GITHUB_TOKEN usually works for packages:write in the vsco org.
 #       If pushes fail with 403, add repo secret VSCO_GHCR_TOKEN (PAT with
 #       write:packages).
-#
-# Note: this builds the in-repo core/min image via Gradle
-# (:distribution:docker:buildDockerImage), not the full Hub distro from
-# opensearch-build. Point the OpenSearch operator / Helm values at
-# ghcr.io/vsco/opensearch:3.8.0-vsco1 after publishing.
 # =============================================================================
 
 name: VSCO (fork) publish OpenSearch image to ghcr.io/vsco
@@ -28,9 +37,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Tag for ghcr.io/vsco/opensearch (e.g. 3.8.0-vsco1)'
+        description: 'Tag for ghcr.io/vsco/opensearch (e.g. 3.8.0-vsco2)'
         required: true
-        default: '3.8.0-vsco1'
+        default: '3.8.0-vsco2'
       java_version:
         description: 'JDK major version for the Gradle build'
         required: true
@@ -44,6 +53,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_ORG: vsco
   IMAGE_NAME: opensearch
+  BASE_REPO: opensearchproject/opensearch
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   build-push-opensearch:
@@ -105,30 +116,103 @@ jobs:
               ;;
           esac
 
-      - name: Build OpenSearch Docker image (Gradle)
+      - name: Verify fork is <version> tag plus core-only changes
         run: |
           set -euo pipefail
-          ./gradlew :distribution:docker:buildDockerImage --parallel --no-build-cache -PDISABLE_BUILD_CACHE
-
-      - name: Retag and push to ghcr.io/vsco
-        run: |
-          set -euo pipefail
-          SRC="docker.opensearch.org/opensearch:${{ steps.version.outputs.opensearch_version }}"
-          DST="${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}"
-          if ! docker image inspect "${SRC}" >/dev/null 2>&1; then
-            # Fallback used by some Gradle builds
-            SRC="opensearch:test"
+          BASE="${{ steps.version.outputs.opensearch_version }}"
+          git fetch --no-tags --depth=1 origin "refs/tags/${BASE}:refs/tags/${BASE}"
+          # Swapping only lib/opensearch-<version>.jar is safe only while every
+          # change since the tag lands in :server (or is fork-only tooling).
+          CHANGED="$(git diff --name-only "refs/tags/${BASE}..HEAD" \
+            | grep -v -E '^(server/|\.github/workflows/vsco-)' || true)"
+          if [[ -n "${CHANGED}" ]]; then
+            echo "Changes outside server/ since tag ${BASE}; a core-jar swap would silently drop them:" >&2
+            echo "${CHANGED}" >&2
+            exit 1
           fi
-          docker tag "${SRC}" "${DST}"
-          docker push "${DST}"
+          git diff --stat "refs/tags/${BASE}..HEAD"
+
+      - name: Build patched core jar (Gradle)
+        run: |
+          set -euo pipefail
+          ./gradlew :server:jar --parallel
+
+      - name: Stage build context
+        id: stage
+        run: |
+          set -euo pipefail
+          OS_VERSION="${{ steps.version.outputs.opensearch_version }}"
+          JAR="server/build/libs/opensearch-${OS_VERSION}.jar"
+          if [[ ! -f "${JAR}" ]]; then
+            echo "Expected core jar at ${JAR}; found:" >&2
+            ls -la server/build/libs/ >&2 || true
+            exit 1
+          fi
+
+          rm -rf vsco-image && mkdir -p vsco-image
+          cp "${JAR}" vsco-image/opensearch-core.jar
+
+          cat > vsco-image/Dockerfile <<'DOCKERFILE'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          ARG OS_VERSION
+          # Official image owns /usr/share/opensearch as opensearch(1000):root(0).
+          COPY --chown=1000:0 opensearch-core.jar /usr/share/opensearch/lib/opensearch-${OS_VERSION}.jar
+          DOCKERFILE
+
+          ls -la vsco-image/
+
+      - name: Verify base image layout
+        run: |
+          set -euo pipefail
+          OS_VERSION="${{ steps.version.outputs.opensearch_version }}"
+          BASE_IMAGE="${{ env.BASE_REPO }}:${OS_VERSION}"
+          docker pull "${BASE_IMAGE}"
+          # Confirm the jar we are about to overwrite actually exists, and that
+          # the plugins we depend on are bundled.
+          docker run --rm -e "OS_VERSION=${OS_VERSION}" --entrypoint /bin/bash "${BASE_IMAGE}" -c '
+            set -euo pipefail
+            test -f "/usr/share/opensearch/lib/opensearch-${OS_VERSION}.jar"
+            ls -d /usr/share/opensearch/plugins/opensearch-security
+            ls -d /usr/share/opensearch/plugins/opensearch-knn
+            echo "base image layout OK"
+          '
+
+      - name: Build and push multi-arch image
+        run: |
+          set -euo pipefail
+          OS_VERSION="${{ steps.version.outputs.opensearch_version }}"
+          DST="${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}"
+          docker buildx build \
+            --platform "${{ env.PLATFORMS }}" \
+            --build-arg "BASE_IMAGE=${{ env.BASE_REPO }}:${OS_VERSION}" \
+            --build-arg "OS_VERSION=${OS_VERSION}" \
+            --provenance=false \
+            --tag "${DST}" \
+            --push \
+            vsco-image
           echo "Pushed ${DST}"
+
+      - name: Verify pushed manifest covers every platform
+        run: |
+          set -euo pipefail
+          DST="${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}"
+          docker buildx imagetools inspect "${DST}"
+          for platform in $(echo "${{ env.PLATFORMS }}" | tr ',' ' '); do
+            if ! docker buildx imagetools inspect "${DST}" | grep -q "${platform}"; then
+              echo "Pushed manifest is missing ${platform}" >&2
+              exit 1
+            fi
+          done
 
       - name: Summary
         run: |
           {
             echo "## VSCO OpenSearch image"
             echo ""
-            echo "Upstream version (buildSrc): \`${{ steps.version.outputs.opensearch_version }}\`"
+            echo "Base: \`${{ env.BASE_REPO }}:${{ steps.version.outputs.opensearch_version }}\`"
+            echo "Patched: \`lib/opensearch-${{ steps.version.outputs.opensearch_version }}.jar\` (built from this fork)"
+            echo "Platforms: \`${{ env.PLATFORMS }}\`"
             echo "Pushed: \`${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}\`"
             echo ""
             echo "Point the OpenSearch Helm/operator image to that tag."
