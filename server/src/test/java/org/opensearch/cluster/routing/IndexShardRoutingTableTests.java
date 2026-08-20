@@ -153,29 +153,10 @@ public class IndexShardRoutingTableTests extends OpenSearchTestCase {
         ShardRouting primary = TestShardRouting.newShardRouting(shardId, "data-0", true, ShardRoutingState.STARTED);
         ShardRouting writer0 = TestShardRouting.newShardRouting(shardId, "data-1", false, ShardRoutingState.STARTED);
         ShardRouting writer1 = TestShardRouting.newShardRouting(shardId, "data-2", false, ShardRoutingState.STARTED);
-        ShardRouting search0 = TestShardRouting.newShardRouting(
-            shardId,
-            "search-0",
-            null,
-            false,
-            true,
-            ShardRoutingState.STARTED,
-            null
-        );
-        ShardRouting search1 = TestShardRouting.newShardRouting(
-            shardId,
-            "search-1",
-            null,
-            false,
-            true,
-            ShardRoutingState.STARTED,
-            null
-        );
+        ShardRouting search0 = TestShardRouting.newShardRouting(shardId, "search-0", null, false, true, ShardRoutingState.STARTED, null);
+        ShardRouting search1 = TestShardRouting.newShardRouting(shardId, "search-1", null, false, true, ShardRoutingState.STARTED, null);
 
-        IndexShardRoutingTable table = new IndexShardRoutingTable(
-            shardId,
-            Arrays.asList(primary, writer0, writer1, search0, search1)
-        );
+        IndexShardRoutingTable table = new IndexShardRoutingTable(shardId, Arrays.asList(primary, writer0, writer1, search0, search1));
 
         int search0First = 0;
         int search1First = 0;
@@ -202,15 +183,7 @@ public class IndexShardRoutingTableTests extends OpenSearchTestCase {
         ShardId shardId = new ShardId(new Index("test", UUID.randomUUID().toString()), 0);
         ShardRouting primary = TestShardRouting.newShardRouting(shardId, "data-0", true, ShardRoutingState.STARTED);
         ShardRouting writer = TestShardRouting.newShardRouting(shardId, "data-1", false, ShardRoutingState.STARTED);
-        ShardRouting search = TestShardRouting.newShardRouting(
-            shardId,
-            "search-0",
-            null,
-            false,
-            true,
-            ShardRoutingState.STARTED,
-            null
-        );
+        ShardRouting search = TestShardRouting.newShardRouting(shardId, "search-0", null, false, true, ShardRoutingState.STARTED, null);
         IndexShardRoutingTable table = new IndexShardRoutingTable(shardId, Arrays.asList(primary, writer, search));
 
         for (int i = 0; i < 20; i++) {

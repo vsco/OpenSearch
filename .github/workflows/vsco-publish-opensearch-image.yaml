@@ -37,9 +37,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Tag for ghcr.io/vsco/opensearch (e.g. 3.8.0-vsco2)'
+        description: 'Tag for ghcr.io/vsco/opensearch (e.g. 3.8.0-vsco3)'
         required: true
-        default: '3.8.0-vsco2'
+        default: '3.8.0-vsco3'
       java_version:
         description: 'JDK major version for the Gradle build'
         required: true

@@ -57,7 +57,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -671,7 +670,18 @@ public class IndexShardRoutingTable extends AbstractDiffable<IndexShardRoutingTa
     }
 
     public ShardIterator searchReplicaActiveInitializingShardIt() {
-        return filterAndOrderShards(ShardRouting::isSearchOnly);
+        return searchReplicaActiveInitializingShardIt(null, null);
+    }
+
+    /**
+     * Returns search-only replicas, ordered by adaptive replica selection when
+     * response statistics are available.
+     */
+    public ShardIterator searchReplicaActiveInitializingShardIt(
+        @Nullable ResponseCollectorService collector,
+        @Nullable Map<String, Long> nodeSearchCounts
+    ) {
+        return filterAndOrderShards(ShardRouting::isSearchOnly, collector, nodeSearchCounts);
     }
 
     /**
@@ -713,20 +723,32 @@ public class IndexShardRoutingTable extends AbstractDiffable<IndexShardRoutingTa
      * eligible set only.
      */
     private ShardIterator filterAndOrderShards(Predicate<ShardRouting> filter) {
+        return filterAndOrderShards(filter, null, null);
+    }
+
+    private ShardIterator filterAndOrderShards(
+        Predicate<ShardRouting> filter,
+        @Nullable ResponseCollectorService collector,
+        @Nullable Map<String, Long> nodeSearchCounts
+    ) {
         List<ShardRouting> matching = new ArrayList<>();
         for (ShardRouting replica : replicas) {
             if (filter.test(replica)) {
                 matching.add(replica);
             }
         }
-        LinkedList<ShardRouting> ordered = new LinkedList<>();
+        List<ShardRouting> active = new ArrayList<>();
+        List<ShardRouting> initializing = new ArrayList<>();
         for (ShardRouting replica : shuffler.shuffle(matching)) {
             if (replica.active()) {
-                ordered.addFirst(replica);
+                active.add(replica);
             } else if (replica.initializing()) {
-                ordered.addLast(replica);
+                initializing.add(replica);
             }
         }
+        List<ShardRouting> ordered = new ArrayList<>(active.size() + initializing.size());
+        ordered.addAll(rankShardsAndUpdateStats(active, collector, nodeSearchCounts));
+        ordered.addAll(initializing);
         return new PlainShardIterator(shardId, ordered);
     }
 
